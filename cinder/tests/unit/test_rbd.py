@@ -423,6 +423,21 @@ class RBDTestCase(test.TestCase):
 
     @common_mocks
     @mock.patch('cinder.objects.Volume.get_by_id')
+    def test_delete_notfound_on_remove_snapshot(self, volume_get_by_id):
+        volume_get_by_id.return_value = self.volume_a
+        proxy = self.mock_proxy.return_value
+        proxy.__enter__.return_value = proxy
+
+        proxy.remove_snap.side_effect = (
+            self.mock_rbd.ImageNotFound)
+
+        self.driver.delete_snapshot(self.snapshot)
+
+        proxy.remove_snap.assert_called_with(self.snapshot.name)
+        proxy.unprotect_snap.assert_called_with(self.snapshot.name)
+
+    @common_mocks
+    @mock.patch('cinder.objects.Volume.get_by_id')
     def test_delete_unprotected_snapshot(self, volume_get_by_id):
         volume_get_by_id.return_value = self.volume_a
         proxy = self.mock_proxy.return_value
@@ -892,7 +907,7 @@ class RBDTestCase(test.TestCase):
                 'extra_specs': {}}
         updates = {'name': 'testvolume',
                    'host': 'currenthost',
-                   'id': fake.volume_id}
+                   'id': fake.VOLUME_ID}
         fake_type = 'high-IOPS'
         volume = fake_volume.fake_volume_obj(context, **updates)
 

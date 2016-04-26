@@ -1820,26 +1820,29 @@ class StorwizeSVCCommonDriver(san.SanDriver,
     """IBM Storwize V7000 SVC abstract base class for iSCSI/FC volume drivers.
 
     Version history:
-    1.0 - Initial driver
-    1.1 - FC support, create_cloned_volume, volume type support,
-          get_volume_stats, minor bug fixes
-    1.2.0 - Added retype
-    1.2.1 - Code refactor, improved exception handling
-    1.2.2 - Fix bug #1274123 (races in host-related functions)
-    1.2.3 - Fix Fibre Channel connectivity: bug #1279758 (add delim to
-            lsfabric, clear unused data from connections, ensure matching
-            WWPNs by comparing lower case
-    1.2.4 - Fix bug #1278035 (async migration/retype)
-    1.2.5 - Added support for manage_existing (unmanage is inherited)
-    1.2.6 - Added QoS support in terms of I/O throttling rate
-    1.3.1 - Added support for volume replication
-    1.3.2 - Added support for consistency group
-    1.3.3 - Update driver to use ABC metaclasses
-    2.0 - Code refactor, split init file and placed shared methods for
-          FC and iSCSI within the StorwizeSVCCommonDriver class
-    2.1 - Added replication V2 support to the global/metro mirror
-          mode
-    2.1.1 - Update replication to version 2.1
+
+    .. code-block:: none
+
+        1.0 - Initial driver
+        1.1 - FC support, create_cloned_volume, volume type support,
+              get_volume_stats, minor bug fixes
+        1.2.0 - Added retype
+        1.2.1 - Code refactor, improved exception handling
+        1.2.2 - Fix bug #1274123 (races in host-related functions)
+        1.2.3 - Fix Fibre Channel connectivity: bug #1279758 (add delim
+                to lsfabric, clear unused data from connections, ensure
+                matching WWPNs by comparing lower case
+        1.2.4 - Fix bug #1278035 (async migration/retype)
+        1.2.5 - Added support for manage_existing (unmanage is inherited)
+        1.2.6 - Added QoS support in terms of I/O throttling rate
+        1.3.1 - Added support for volume replication
+        1.3.2 - Added support for consistency group
+        1.3.3 - Update driver to use ABC metaclasses
+        2.0 - Code refactor, split init file and placed shared methods
+              for FC and iSCSI within the StorwizeSVCCommonDriver class
+        2.1 - Added replication V2 support to the global/metro mirror
+              mode
+        2.1.1 - Update replication to version 2.1
     """
 
     VERSION = "2.1.1"
@@ -1854,6 +1857,8 @@ class StorwizeSVCCommonDriver(san.SanDriver,
         super(StorwizeSVCCommonDriver, self).__init__(*args, **kwargs)
         self.configuration.append_config_values(storwize_svc_opts)
         self._backend_name = self.configuration.safe_get('volume_backend_name')
+        self.active_ip = self.configuration.san_ip
+        self.inactive_ip = self.configuration.storwize_san_secondary_ip
         self._helpers = StorwizeHelpers(self._run_ssh)
         self._vdiskcopyops = {}
         self._vdiskcopyops_loop = None
@@ -2019,14 +2024,13 @@ class StorwizeSVCCommonDriver(san.SanDriver,
         command = ' '.join(cmd_list)
         if not self.sshpool:
             try:
-                self.sshpool = self._set_up_sshpool(self.configuration.san_ip)
+                self.sshpool = self._set_up_sshpool(self.active_ip)
             except paramiko.SSHException:
                 LOG.warning(_LW('Unable to use san_ip to create SSHPool. Now '
                                 'attempting to use storwize_san_secondary_ip '
                                 'to create SSHPool.'))
-                if self.configuration.storwize_san_secondary_ip is not None:
-                    self.sshpool = self._set_up_sshpool(
-                        self.configuration.storwize_san_secondary_ip)
+                if self._toggle_ip():
+                    self.sshpool = self._set_up_sshpool(self.active_ip)
                 else:
                     LOG.warning(_LW('Unable to create SSHPool using san_ip '
                                     'and not able to use '
@@ -2040,32 +2044,22 @@ class StorwizeSVCCommonDriver(san.SanDriver,
         except Exception:
             # Need to check if creating an SSHPool storwize_san_secondary_ip
             # before raising an error.
-
-            if self.configuration.storwize_san_secondary_ip is not None:
-                if (self.sshpool.ip ==
-                        self.configuration.storwize_san_secondary_ip):
+            try:
+                if self._toggle_ip():
                     LOG.warning(_LW("Unable to execute SSH command with "
-                                    "storwize_san_secondary_ip. "
-                                    "Attempting to switch IP back "
-                                    "to san_ip %s."),
-                                self.configuration.san_ip)
-                    self.sshpool = self._set_up_sshpool(
-                        self.configuration.san_ip)
+                                    "%(inactive)s. Attempting to execute SSH "
+                                    "command with %(active)s."),
+                                {'inactive': self.inactive_ip,
+                                 'active': self.active_ip})
+                    self.sshpool = self._set_up_sshpool(self.active_ip)
                     return self._ssh_execute(self.sshpool, command,
                                              check_exit_code, attempts)
                 else:
-                    LOG.warning(_LW("Unable to execute SSH command. "
-                                    "Attempting to switch IP to %s."),
-                                self.configuration.storwize_san_secondary_ip)
-                    self.sshpool = self._set_up_sshpool(
-                        self.configuration.storwize_san_secondary_ip)
-                    return self._ssh_execute(self.sshpool, command,
-                                             check_exit_code, attempts)
-            else:
-                LOG.warning(_LW('Unable to execute SSH command. '
-                                'Not able to use '
-                                'storwize_san_secondary_ip since it is '
-                                'not configured.'))
+                    LOG.warning(_LW('Not able to use '
+                                    'storwize_san_secondary_ip since it is '
+                                    'not configured.'))
+                    raise
+            except Exception:
                 with excutils.save_and_reraise_exception():
                     LOG.error(_LE("Error running SSH command: %s"),
                               command)
@@ -2118,6 +2112,18 @@ class StorwizeSVCCommonDriver(san.SanDriver,
         except Exception:
             with excutils.save_and_reraise_exception():
                 LOG.error(_LE("Error running SSH command: %s"), command)
+
+    def _toggle_ip(self):
+        # Change active_ip if storwize_san_secondary_ip is set.
+        if self.configuration.storwize_san_secondary_ip is None:
+            return False
+
+        self.inactive_ip, self.active_ip = self.active_ip, self.inactive_ip
+        LOG.info(_LI('Toggle active_ip from %(old)s to '
+                     '%(new)s.'),
+                 {'old': self.inactive_ip,
+                  'new': self.active_ip})
+        return True
 
     def ensure_export(self, ctxt, volume):
         """Check that the volume exists on the storage.
@@ -3026,7 +3032,7 @@ class StorwizeSVCCommonDriver(san.SanDriver,
         :param snapshots: a list of snapshot dictionaries in the cgsnapshot.
         :param source_cg: the dictionary of a consistency group as source.
         :param source_vols: a list of volume dictionaries in the source_cg.
-        :return model_update, volumes_model_update
+        :returns: model_update, volumes_model_update
         """
         LOG.debug('Enter: create_consistencygroup_from_src.')
         if cgsnapshot and snapshots:

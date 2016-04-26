@@ -37,7 +37,7 @@ these objects be simple dictionaries.
 """
 
 from oslo_config import cfg
-from oslo_db import concurrency as db_concurrency
+from oslo_db import api as oslo_db_api
 from oslo_db import options as db_options
 
 from cinder.api import common
@@ -67,7 +67,9 @@ CONF.set_default('sqlite_db', 'cinder.sqlite', group='database')
 _BACKEND_MAPPING = {'sqlalchemy': 'cinder.db.sqlalchemy.api'}
 
 
-IMPL = db_concurrency.TpoolDbapiWrapper(CONF, _BACKEND_MAPPING)
+IMPL = oslo_db_api.DBAPI.from_config(conf=CONF,
+                                     backend_mapping=_BACKEND_MAPPING,
+                                     lazy=True)
 
 # The maximum value a signed INT type may have
 MAX_INT = constants.DB_MAX_INT
@@ -1200,28 +1202,40 @@ def conditional_update(context, model, values, expected_values, filters=(),
 
        We can select values based on conditions using Case objects in the
        'values' argument. For example:
-       has_snapshot_filter = sql.exists().where(
-           models.Snapshot.volume_id == models.Volume.id)
-       case_values = db.Case([(has_snapshot_filter, 'has-snapshot')],
-                             else_='no-snapshot')
-       db.conditional_update(context, models.Volume, {'status': case_values},
-                             {'status': 'available'})
+
+       .. code-block:: python
+
+        has_snapshot_filter = sql.exists().where(
+            models.Snapshot.volume_id == models.Volume.id)
+        case_values = db.Case([(has_snapshot_filter, 'has-snapshot')],
+                              else_='no-snapshot')
+        db.conditional_update(context, models.Volume, {'status': case_values},
+                              {'status': 'available'})
 
        And we can use DB fields for example to store previous status in the
        corresponding field even though we don't know which value is in the db
        from those we allowed:
-       db.conditional_update(context, models.Volume,
-                             {'status': 'deleting',
-                              'previous_status': models.Volume.status},
-                             {'status': ('available', 'error')})
+
+       .. code-block:: python
+
+        db.conditional_update(context, models.Volume,
+                              {'status': 'deleting',
+                               'previous_status': models.Volume.status},
+                              {'status': ('available', 'error')})
 
        WARNING: SQLAlchemy does not allow selecting order of SET clauses, so
-       for now we cannot do things like
+       for now we cannot do things like:
+
+       .. code-block:: python
+
            {'previous_status': model.status, 'status': 'retyping'}
+
        because it will result in both previous_status and status being set to
        'retyping'.  Issue has been reported [1] and a patch to fix it [2] has
        been submitted.
+
        [1]: https://bitbucket.org/zzzeek/sqlalchemy/issues/3541/
+
        [2]: https://github.com/zzzeek/sqlalchemy/pull/200
 
        :param values: Dictionary of key-values to update in the DB.
@@ -1231,7 +1245,7 @@ def conditional_update(context, model, values, expected_values, filters=(),
        :param include_deleted: Should the update include deleted items, this
                                is equivalent to read_deleted
        :param project_only: Should the query be limited to context's project.
-       :returns number of db rows that were updated
+       :returns: number of db rows that were updated
     """
     return IMPL.conditional_update(context, model, values, expected_values,
                                    filters, include_deleted, project_only)
